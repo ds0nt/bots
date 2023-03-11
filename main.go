@@ -3,6 +3,7 @@ package main
 import (
 	"bots/chatgpt"
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io/ioutil"
@@ -17,6 +18,7 @@ import (
 
 	texttospeech "cloud.google.com/go/texttospeech/apiv1"
 	"cloud.google.com/go/texttospeech/apiv1/texttospeechpb"
+	"github.com/alecthomas/chroma/quick"
 	"github.com/spf13/cobra"
 )
 
@@ -25,9 +27,16 @@ var token = os.Getenv("CHATGPT_TOKEN")
 var rootCmd = &cobra.Command{
 	Use: "bots",
 }
+var logFile = "bots.log"
+
+var middlewares = []MessageMiddleware{
+	LogToFileMiddleware(logFile),
+	SyntaxHighlightCodeBlocksMiddleware,
+}
 
 func main() {
 	rootCmd.PersistentFlags().BoolP("no-tts", "T", false, "Disable text to speech")
+	rootCmd.PersistentFlags().BoolP("no-logfile", "L", false, "Disable saving log to speech")
 
 	singleCmd := &cobra.Command{
 		Use:   "single",
@@ -72,7 +81,7 @@ func blogCmd(cmd *cobra.Command, args []string) error {
 		Model:     "gpt-3.5-turbo-0301",
 		MaxTokens: 500,
 		Messages: []chatgpt.ChatMessage{
-			{Role: "system", Content: bots.Bots[bot]},
+			{Role: "system", Content: bots.Bots[bot].Prompt},
 			{Role: "user",
 				Content: taskStr,
 			},
@@ -85,7 +94,8 @@ func blogCmd(cmd *cobra.Command, args []string) error {
 		fmt.Println(err)
 		return err
 	}
-	fmt.Println(completion.Choices[0].Message.Content)
+	txt := applyMiddleware(middlewares, "blogger", completion.Choices[0].Message.Content)
+	fmt.Println(txt)
 	return nil
 }
 
@@ -100,13 +110,15 @@ func singleCmd(cmd *cobra.Command, args []string) error {
 		Model:     "gpt-3.5-turbo-0301",
 		MaxTokens: 500,
 		Messages: []chatgpt.ChatMessage{
-			{Role: "system", Content: bots.Bots[bot]},
+			{Role: "system", Content: bots.Bots[bot].Prompt},
 		},
 	}
 
 	for {
 		// prompt user
-		rx.Messages = append(rx.Messages, chatgpt.ChatMessage{Role: "user", Content: getUserInput()})
+		input := applyMiddleware(middlewares, "user", getUserInput())
+
+		rx.Messages = append(rx.Messages, chatgpt.ChatMessage{Role: "user", Content: input})
 		removeOld(rx.Messages, 2500)
 		// get bot message
 		completion, err := chatgpt.GetGPTTurbo(token, rx)
@@ -116,7 +128,7 @@ func singleCmd(cmd *cobra.Command, args []string) error {
 		}
 
 		// output bot message
-		txt := completion.Choices[0].Message.Content
+		txt := applyMiddleware(middlewares, bot, completion.Choices[0].Message.Content)
 		fmt.Println(wrapInMagenta(bot)+":", txt)
 		rx.Messages = append(rx.Messages, completion.Choices[0].Message)
 		err = tts(txt, "en-US-Wavenet-H")
@@ -160,7 +172,7 @@ func teamCmd(cmd *cobra.Command, args []string) error {
 	for k, _ := range rxs {
 		rx := &chatgpt.ChatRequest{}
 		rx.Messages = []chatgpt.ChatMessage{
-			{Role: "system", Content: bots.Bots[botNames[k]]},
+			{Role: "system", Content: bots.Bots[botNames[k]].Prompt},
 			{Role: "assistant", Content: bot1GreetsBots},
 		}
 		rx.Model = "gpt-3.5-turbo-0301"
@@ -182,7 +194,8 @@ func teamCmd(cmd *cobra.Command, args []string) error {
 				fmt.Println(err)
 				return err
 			}
-			txt := reply.Choices[0].Message.Content
+			txt := applyMiddleware(middlewares, currentBot, reply.Choices[0].Message.Content)
+
 			fmt.Println(wrapInGreen(currentBot)+":", txt)
 			if i == 0 {
 				err = tts(txt, "en-US-Wavenet-H")
@@ -328,4 +341,66 @@ func tts(text string, voice string) error {
 	cmd.Stderr = os.Stderr
 	err = cmd.Run()
 	return err
+}
+
+func applyMiddleware(middlewares []MessageMiddleware, sender string, text string) string {
+	for _, middleware := range middlewares {
+		text = middleware(sender, text)
+	}
+	return text
+}
+
+type MessageMiddleware func(sender string, text string) string
+
+// LogToFileMiddleware
+func LogToFileMiddleware(filename string) MessageMiddleware {
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return func(sender string, text string) string {
+		_, err := f.WriteString(sender + ": " + text)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return text
+	}
+}
+
+// Syntax Highlight Code Blocks Middleware
+func SyntaxHighlightCodeBlocksMiddleware(sender, text string) string {
+	language := "go"
+	// Highlight the source code
+
+	inCode := false
+	newLines := []string{}
+	codeLines := []string{}
+
+	// replace code blocks with syntax highlighted code blocks
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "```") {
+			inCode = !inCode
+			if inCode {
+				language = strings.TrimPrefix(line, "```")
+			} else {
+				w := &bytes.Buffer{}
+				err := quick.Highlight(w, strings.Join(codeLines, "\n"), language, "terminal256", "monokai")
+				if err != nil {
+					panic(err)
+				}
+				newLines = append(newLines, "```"+language)
+				newLines = append(newLines, w.String())
+				newLines = append(newLines, "```")
+				codeLines = []string{}
+			}
+			continue
+		}
+
+		if inCode {
+			codeLines = append(codeLines, line)
+		} else {
+			newLines = append(newLines, line)
+		}
+	}
+	return strings.Join(newLines, "\n")
 }

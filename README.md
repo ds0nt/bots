@@ -73,3 +73,4 @@ In the above command, `BotName1`, `BotName2`, and `BotName3` are the names of th
 - The `getUserInput()` function allows users to input multiline text through `<<<` and `>>>` delimiters.
 - The `tts()` function converts text to speech using the Google Cloud Text-to-Speech API. If this is not available, the function will do nothing.
 - The `removeOld()` function removes messages from memory if the message count or total message length exceeds a threshold.
+- It's a good idea to use [direnv](https://direnv.net/) to handle your environment variables, including the ChatGPT token.
